@@ -1,0 +1,5 @@
+env_name: drifting
+created: 2026-10-13T03:53:43+00:00
+python: Python 3.12.14
+torch: 2.11.0 cuda 13.0
+size_bytes: 4221627176

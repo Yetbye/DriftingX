@@ -1,0 +1,24 @@
+\begin{center}
+\captionof{table}{\textbf{Training setup for CrossFlow variants on ImageNet $256\times256$.} All variants use the same training schedule and differ mainly in depth, hidden dimension, and parameter count.}
+\vspace{0.5em}
+\small
+\begin{tabular}{l c c c}
+\toprule
+\textbf{Hyperparameter} & \textbf{CrossFlow-B} & \textbf{CrossFlow-L}  & \textbf{CrossFlow-XL} \\
+\midrule
+Depth (layers) & 12 & 24 & 28\\
+Hidden dimension & 768 & 1024 & 1152 \\
+\# parameters & 95M & 315M & 461M\\
+Patch size & 16 & 16  & 16 \\
+\midrule
+Epochs & 160 & 160 & 160 \\
+Batch size & 2048 & 2048 & 2048 \\
+Optimizer & Muon & Muon & Muon \\
+Learning rate & 8e-4 & 8e-4 & 8e-4 \\
+LR warmup & 5 epochs & 5 epochs & 5 epochs \\
+EMA decay & \multicolumn{3}{c}{selected from 0.999/0.9995/0.9999} \\
+Weight decay & 1e-6 & 1e-6 & 1e-6 \\
+\bottomrule
+\end{tabular}
+\label{tab:hyperparams}
+\end{center}

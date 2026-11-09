@@ -1,0 +1,21 @@
+# Keep the image small and free of run-specific state.
+# Datasets, the offline asset bundle and run outputs are mounted at runtime.
+runs/
+data/
+dist/
+logs/
+offline_bundle/
+hf_cache/
+.cache/
+.test-cache/
+.torch-cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.venv/
+uv.lock
+CrossFlow/imgs/
+*.tar
+*.tar.gz

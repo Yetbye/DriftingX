@@ -1,0 +1,14 @@
+[
+  {
+    "run": "/home/lxw/drifting/runs/C10_P_pixel",
+    "fid": 248.18402163994233,
+    "num_samples": 10000,
+    "grid": "/home/lxw/drifting/runs/C10_P_pixel/fid_samples.jpg"
+  },
+  {
+    "run": "/home/lxw/drifting/runs/C10_X_LP",
+    "fid": 259.7831702509461,
+    "num_samples": 10000,
+    "grid": "/home/lxw/drifting/runs/C10_X_LP/fid_samples.jpg"
+  }
+]

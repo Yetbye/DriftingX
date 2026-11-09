@@ -1,0 +1,10 @@
+\iffalse
+\section{Limitations and Future Work}
+
+The current study focuses on class-conditional ImageNet-1k at $256\times256$, so the results do not yet establish performance for text-to-image generation, substantially higher resolutions, or broader data domains. CrossFlow also depends on the quality of the fixed encoder: the encoder ablation shows that changing the latent representation materially affects FID. Finally, the strongest results use perceptual and adversarial losses, and the GAN term requires careful time-dependent weighting to avoid instability.
+
+These limitations suggest several directions for future work. First, CrossFlow could be evaluated with stronger or jointly trained encoders to reduce the dependence on a fixed tokenizer. Second, text conditioning and higher-resolution generation would test whether the cross-space objective scales beyond class-conditional ImageNet. Third, alternatives to adversarial refinement may improve stability while retaining the benefit of direct pixel-space supervision.
+\fi
+\section{Conclusion}
+
+We introduced \emph{CrossFlow}, a cross-space generative framework that maps latent noise directly to pixels. The central idea is to keep the efficiency of a latent input path while supervising the model with an image-valued one-step objective. Instantiated with a fixed encoder and a Transformer generator, CrossFlow unifies one-step generation and latent-to-pixel decoding in a single model. This design removes the separate pretrained decoder at inference, exposes generated images directly to perceptual and adversarial refinement losses, and improves decoding quality when input latents are produced by a latent generator. On ImageNet-1k at $256\times256$, CrossFlow-XL achieves 1.62 FID with a single function evaluation, and ablations show that the latent representation and pixel-space auxiliary losses are important for high-fidelity generation.

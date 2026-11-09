@@ -1,0 +1,90 @@
+hsdp_dim: 1
+compile: 0
+logging:
+  use_wandb: false
+  log_every_k: 25
+dataset:
+  name: mnist
+  resolution: 64
+  use_aug: false
+  use_latent: false
+  use_cache: false
+  num_classes: 10
+  batch_size: 256
+  eval_batch_size: 256
+  kwargs:
+    num_workers: 4
+    pin_memory: false
+    prefetch_factor: 2
+  num_workers: 2
+model:
+  arch: crossflow
+  img_size: 64
+  patch_size: 8
+  latent_channels: 4
+  latent_size: 8
+  latent_patch_size: 1
+  hidden_size: 512
+  depth: 8
+  num_heads: 8
+  mlp_ratio: 2.6666666666666665
+  num_class_tokens: 8
+  num_time_tokens: 4
+  output_activation: none
+optimizer:
+  lr_schedule:
+    learning_rate: 0.0002
+    warmup_steps: 200
+    lr_schedule: const
+    total_steps: 5000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+train:
+  train_batch_size: 0
+  seed: 42
+  total_steps: 5000
+  save_per_step: 2000
+  keep_last: 2
+  eval_per_step: 2500
+  eval_samples: 256
+  pos_per_sample: 4
+  neg_per_sample: 4
+  positive_bank_size: 64
+  negative_bank_size: 128
+  forward_dict:
+    gen_per_label: 4
+    cfg_min: 1.0
+    cfg_max: 2.0
+    neg_cfg_pw: 1.0
+    no_cfg_frac: 0.0
+  activation_kwargs:
+    patch_mean_size:
+    - 2
+    patch_std_size:
+    - 2
+    use_std: true
+    use_mean: true
+    every_k_block: 2
+  loss_kwargs:
+    R_list:
+    - 0.2
+    - 0.05
+    - 0.02
+  cfg_list:
+  - 1.0
+  - 2.0
+  ema_decay: 0.999
+  push_per_step: 16
+  push_at_resume: 1
+  eval_on_step_one: false
+  run_eval: false
+  train_sample_per_step: 1000
+  train_sample_grid_size: 36
+  train_sample_cfg: 1.5
+  train_sample_seed: 1234
+  objective: drift
+feature:
+  use_mae: true
+  use_convnext: false
+  mae_path: runs/mnist_real_mae_pixel_latest

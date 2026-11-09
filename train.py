@@ -1,0 +1,762 @@
+from __future__ import annotations
+
+import argparse
+import copy
+import gc
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
+
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from einops import rearrange, repeat
+from tqdm import tqdm
+
+from dataset.dataset import epoch0_sampler, get_postprocess_fn, infinite_sampler
+from drift_loss import drift_loss
+from memory_bank import ArrayMemoryBank
+from models.mae_model import build_activation_function
+from utils.ckpt_util import restore_checkpoint, save_checkpoint, save_params_ema_artifact
+from utils.env import HF_ROOT
+from utils.fid_util import evaluate_fid
+from utils.fid_util_ddp import evaluate_fid_ddp
+from utils.hsdp_util import merge_data, set_global_mesh
+from utils.init_util import maybe_init_state_params
+from utils.logging import is_rank_zero, log_for_0
+from utils.misc import load_config, maybe_compile, profile_func, run_init, sanitize_train_config, stamp_workdir
+from utils.model_builder import build_model_dict
+
+run_init()
+
+
+@dataclass
+class TrainState:
+    step: int
+    model: torch.nn.Module
+    optimizer: torch.optim.Optimizer
+    ema_model: Optional[torch.nn.Module] = None
+    ema_decay: float = 0.999
+    device: Optional[torch.device] = None
+
+
+def _world_size() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_world_size()
+    return 1
+
+
+def _rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+def _device() -> torch.device:
+    if torch.cuda.is_available():
+        local_rank = int(torch.cuda.current_device())
+        return torch.device(f"cuda:{local_rank}")
+    return torch.device("cpu")
+
+
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def _generator_model_config(model) -> dict:
+    model = _unwrap_model(model)
+    if hasattr(model, "model_config"):
+        return dict(model.model_config)
+    return {}
+
+
+def _set_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+    for group in optimizer.param_groups:
+        group["lr"] = float(lr)
+
+
+def _sync_after_rank0_io(workdir: str, tag: str, timeout_s: float = 3600.0) -> None:
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+
+    sync_dir = Path(workdir).resolve() / "log" / "sync"
+    marker = sync_dir / f"{tag}.done"
+    if _rank() == 0:
+        sync_dir.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time()), encoding="utf-8")
+        return
+
+    start = time.time()
+    while not marker.exists():
+        if time.time() - start > timeout_s:
+            raise TimeoutError(f"Timed out waiting for rank-0 IO marker: {marker}")
+        time.sleep(2.0)
+
+
+def _strip_compile_prefix(name: str) -> str:
+    return name.removeprefix("_orig_mod.")
+
+
+def _named_module_tensors(model: torch.nn.Module):
+    model = _unwrap_model(model)
+    params = {_strip_compile_prefix(k): v for k, v in model.named_parameters()}
+    buffers = {_strip_compile_prefix(k): v for k, v in model.named_buffers()}
+    return params, buffers
+
+
+def _update_ema_model(ema_model: torch.nn.Module, model: torch.nn.Module, decay: float) -> None:
+    ema_params, ema_buffers = _named_module_tensors(ema_model)
+    model_params, model_buffers = _named_module_tensors(model)
+
+    if ema_params.keys() != model_params.keys():
+        missing = sorted(ema_params.keys() - model_params.keys())
+        extra = sorted(model_params.keys() - ema_params.keys())
+        raise RuntimeError(f"EMA/model parameter mismatch: missing={missing[:5]}, extra={extra[:5]}")
+
+    with torch.inference_mode():
+        for name, ema_param in ema_params.items():
+            param = model_params[name].detach().to(device=ema_param.device, dtype=ema_param.dtype)
+            ema_param.mul_(decay).add_(param, alpha=1.0 - decay)
+
+        for name, ema_buffer in ema_buffers.items():
+            if name not in model_buffers:
+                continue
+            buffer = model_buffers[name].detach().to(device=ema_buffer.device, dtype=ema_buffer.dtype)
+            ema_buffer.copy_(buffer)
+
+
+def train_step(
+    state: TrainState,
+    labels,
+    samples,
+    negative_samples,
+    feature_params,
+    feature_apply,
+    learning_rate_fn: Any = None,
+    cfg_min=1.0,
+    cfg_max=4.0,
+    neg_cfg_pw=1.0,
+    no_cfg_frac=0.0,
+    gen_per_label=8,
+    activation_kwargs=dict(),
+    loss_kwargs=dict(R_list=[0.02, 0.05, 0.2]),
+    max_grad_norm=2.0,
+    objective="drift",
+    freq_weight: float = 0.0,
+    freq_weight_start: float = 0.8,
+    freq_weight_end: float = 0.0,
+    freq_transition_frac: float = 0.4,
+    freq_weight_high: float = 1.0,
+    total_steps_for_sched: int = 1,
+    rep_head=None,
+    rep_target_fn=None,
+    rep_align_weight: float = 0.0,
+    rep_condition: bool = False,
+):
+    device = state.device
+    labels = labels.to(device=device, dtype=torch.long)
+    samples = samples.to(device=device, dtype=torch.float32)
+    negative_samples = negative_samples.to(device=device, dtype=torch.float32)
+
+    bsz = labels.shape[0]
+
+    frac = torch.rand((bsz,), device=device)
+    pw = 1 - neg_cfg_pw
+    if abs(pw) < 1e-6:
+        cfg = torch.exp(torch.log(torch.tensor(cfg_min, device=device)) + frac * (torch.log(torch.tensor(cfg_max, device=device)) - torch.log(torch.tensor(cfg_min, device=device))))
+    else:
+        cfg = (cfg_min**pw + frac * (cfg_max**pw - cfg_min**pw)) ** (1 / pw)
+
+    frac2 = torch.rand((bsz,), device=device)
+    cfg = torch.where(frac2 < no_cfg_frac, torch.ones_like(cfg), cfg)
+
+    uncond_w = (cfg - 1) * (gen_per_label - 1) / max(1, negative_samples.shape[1])
+    n_pos, n_gen, n_uncond = samples.shape[1], gen_per_label, negative_samples.shape[1]
+
+    neg_samples_input = torch.cat([samples, negative_samples], dim=1)
+    neg_samples_input = rearrange(neg_samples_input, "b x h w c -> (b x) h w c")
+
+    with torch.no_grad():
+        sg_features_raw = feature_apply(neg_samples_input, **activation_kwargs)
+        sg_features = {k: rearrange(v, "(b x) ... -> b x ...", b=bsz, x=n_pos + n_uncond) for k, v in sg_features_raw.items()}
+
+    lr = learning_rate_fn(state.step)
+    _set_lr(state.optimizer, lr)
+
+    state.model.train()
+    state.optimizer.zero_grad(set_to_none=True)
+
+    input_labels = repeat(labels, "b -> (b g)", g=gen_per_label)
+    input_cfg = repeat(cfg, "b -> (b g)", g=gen_per_label)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        gen_samples = state.model(c=input_labels, cfg_scale=input_cfg)["samples"]
+        gen_features_raw = feature_apply(gen_samples, **activation_kwargs)
+        gen_features = {k: rearrange(v, "(b g) ... -> b g ...", b=bsz, g=n_gen) for k, v in gen_features_raw.items()}
+
+    total_loss = torch.tensor(0.0, device=device)
+    total_info = {}
+
+    # ---- Mechanism B: predict-then-condition (representation alignment) ----
+    # The generator predicts the frozen encoder's representation of the target and
+    # is aligned to it (REPA-style). This supplements the drift loss so the model
+    # learns to predict the representation it conditions on, instead of denoising a
+    # second representation trajectory. Only the alignment term is used here; the
+    # self-conditioning is folded into the generator's forward.
+    if rep_head is not None and rep_target_fn is not None and float(rep_align_weight) > 0:
+        from grounding import RepresentationHead
+
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            # target representation of the real positive samples (first per sample)
+            target_rep = rep_target_fn(samples[:, 0])  # (B, L_enc, D_enc)
+            # predicted representation from the generator's hidden state
+            gen_hidden = state.model.get_hidden(input_labels) if hasattr(state.model, "get_hidden") else None
+            if gen_hidden is not None:
+                pred_rep = rep_head(gen_hidden)  # (B*gen_per_label, L_model, D_enc)
+                # align per-sample on the shared batch/token prefix
+                n = min(pred_rep.shape[0], target_rep.shape[0])
+                lt = min(pred_rep.shape[1], target_rep.shape[1])
+                align = RepresentationHead.align_loss(pred_rep[:n, :lt], target_rep[:n, :lt])
+                total_loss = total_loss + float(rep_align_weight) * align
+                total_info["rep_align"] = float(align.detach().cpu().item())
+
+    for k in sg_features.keys():
+        feature_pos = sg_features[k][:, :n_pos]
+        feature_gen = gen_features[k]
+        feature_uncond = sg_features[k][:, n_pos:]
+
+        feature_pos = rearrange(feature_pos, "b x f d -> (b f) x d")
+        feature_gen = rearrange(feature_gen, "b x f d -> (b f) x d")
+        feature_uncond = rearrange(feature_uncond, "b x f d -> (b f) x d")
+
+        b_feat = feature_gen.shape[0]
+        weight_neg = repeat(uncond_w, "b -> (b f) k", f=b_feat // uncond_w.shape[0], k=n_uncond)
+
+        loss_k, info_k = drift_loss(
+            gen=feature_gen,
+            fixed_pos=feature_pos,
+            fixed_neg=feature_uncond,
+            weight_gen=torch.ones_like(feature_gen[:, :, 0]),
+            weight_pos=torch.ones_like(feature_pos[:, :, 0]),
+            weight_neg=weight_neg,
+            **loss_kwargs,
+        )
+
+        total_loss = total_loss + loss_k.mean()
+        for k2, v2 in info_k.items():
+            total_info[f"{k2}/{k}"] = float(v2.detach().cpu().item())
+
+    # f-loss regularizer (arXiv 2609.02748): frequency-balanced supervision on the
+    # generated pixels against real samples. Spectral matching regularizer added on
+    # top of the drift loss; weight decays (freq early -> pixel refinement late).
+    if freq_weight and float(freq_weight) > 0:
+        from freq_loss import freq_weight_schedule, focal_log_frequency_loss
+
+        a = freq_weight_schedule(state.step, total_steps_for_sched,
+                                 start=freq_weight_start, end=freq_weight_end,
+                                 transition_frac=freq_transition_frac) * float(freq_weight)
+        if a > 0:
+            # real target: flatten positive samples to match generated batch shape.
+            # gen_samples: (B*gen_per_label, H, W, C); real: (B, n_pos, H, W, C).
+            real = samples[:, 0]  # (B, H, W, C) first positive per sample
+            real_flat = repeat(real, "b h w c -> (b g) h w c", g=gen_per_label)
+            floss = focal_log_frequency_loss(gen_samples, real_flat, weight_high=freq_weight_high)
+            total_loss = total_loss + a * floss
+            total_info["f_loss"] = float(floss.detach().cpu().item())
+            total_info["freq_weight"] = float(a)
+
+    total_loss.backward()
+    g_norm = float(torch.nn.utils.clip_grad_norm_(state.model.parameters(), max_grad_norm).item())
+    state.optimizer.step()
+
+    _update_ema_model(state.ema_model, state.model, state.ema_decay)
+
+    metric = {k: float(v) for k, v in total_info.items()}
+    metric["loss"] = float(total_loss.detach().cpu().item())
+    metric["g_norm"] = g_norm
+    metric["lr"] = float(lr)
+    state.step += 1
+    return state, metric
+
+
+def generate_step(batch, params, apply_fn, postprocess_fn, cfg_scale=1.0):
+    _, labels = batch
+    if isinstance(params, torch.nn.Module):
+        model = params
+    else:
+        model = params["model"] if isinstance(params, dict) and "model" in params else params
+    device = next(model.parameters()).device if isinstance(model, torch.nn.Module) else torch.device("cpu")
+    labels = labels.to(device=device, dtype=torch.long)
+    if apply_fn is None:
+        apply_fn = lambda m, y, cfg: m(c=y, cfg_scale=cfg)["samples"]  # noqa: E731
+    if isinstance(model, torch.nn.Module):
+        model.eval()
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        latent_samples = apply_fn(model, labels, cfg_scale)
+        return postprocess_fn(latent_samples).cpu()
+
+
+def _log_training_samples(
+    *,
+    logger,
+    eval_loader,
+    model,
+    postprocess_fn,
+    cfg_scale: float,
+    grid_size: int,
+    seed: int,
+) -> None:
+    if _rank() != 0 or grid_size <= 0:
+        return
+    labels = []
+    first_images = None
+    for batch in epoch0_sampler(eval_loader):
+        if not isinstance(batch, (tuple, list)) or len(batch) < 2:
+            continue
+        if first_images is None:
+            first_images = batch[0]
+        labels.append(batch[1])
+        if sum(int(x.shape[0]) for x in labels) >= grid_size:
+            break
+    if not labels:
+        return
+    sample_labels = torch.cat(labels, dim=0)[:grid_size]
+    batch = (first_images, sample_labels)
+    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+        samples = generate_step(
+            batch,
+            params=model,
+            apply_fn=lambda m, y, cfg: m(c=y, cfg_scale=cfg, train=False)["samples"],  # noqa: E731
+            postprocess_fn=postprocess_fn,
+            cfg_scale=float(cfg_scale),
+        )
+    logger.log_dict({"samples/step": logger.step, "samples/cfg_scale": float(cfg_scale)})
+    logger.log_image("samples/train", samples, max_images=grid_size, grid_cols=6)
+
+
+def train_gen(
+    model,
+    optimizer,
+    logger,
+    eval_loader,
+    train_loader,
+    learning_rate_fn,
+    preprocess_fn,
+    postprocess_fn,
+    dataset_name="imagenet256",
+    train_batch_size=0,
+    total_steps=100000,
+    save_per_step=10000,
+    eval_per_step=5000,
+    eval_samples=50000,
+    activation_fn=None,
+    feature_params=None,
+    ema_decay=0.999,
+    seed=42,
+    pos_per_sample=32,
+    neg_per_sample=16,
+    forward_dict=dict(
+        gen_per_label=16,
+        cfg_min=1.0,
+        cfg_max=4.0,
+        neg_cfg_pw=1.0,
+        no_cfg_frac=0.0,
+    ),
+    positive_bank_size=64,
+    negative_bank_size=512,
+    cfg_list=(1.0,),
+    activation_kwargs=dict(
+        patch_mean_size=[2, 4],
+        patch_std_size=[2, 4],
+        use_std=True,
+        use_mean=True,
+        every_k_block=2,
+    ),
+    max_grad_norm=2.0,
+    loss_kwargs=dict(R_list=(0.02, 0.05, 0.2)),
+    keep_last=2,
+    keep_every=None,
+    init_from="",
+    push_per_step=0,
+    push_at_resume=3000,
+    workdir="runs",
+    eval_on_step_one=True,
+    run_eval=True,
+    train_sample_per_step: int = 0,
+    train_sample_grid_size: int = 36,
+    train_sample_cfg: float | None = None,
+    train_sample_seed: int = 1234,
+    compile_level: int = 2,
+    profile: bool = False,
+    objective: str = "drift",
+    freq_weight: float = 0.0,
+    freq_weight_start: float = 0.8,
+    freq_weight_end: float = 0.0,
+    freq_transition_frac: float = 0.4,
+    freq_weight_high: float = 1.0,
+    rep_align_weight: float = 0.0,
+    rep_condition: bool = False,
+    rep_head=None,
+    rep_target_fn=None,
+):
+    # `objective` selects the training loss:
+    #   "drift"     -> the drifting fixed-point loss (our core method; works today)
+    #   "crossflow" -> CrossFlow's L_CF (JVP-based); wired as a comparison path.
+    if str(objective).lower() not in ("drift", "crossflow"):
+        raise ValueError(f"Unknown objective {objective!r}; expected 'drift' or 'crossflow'.")
+    objective = str(objective).lower()
+    torch.manual_seed(seed)
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+    model = model.to(device)
+    ema_model = copy.deepcopy(model).to(device)
+
+    if isinstance(ema_decay, (list, tuple)):
+        if len(ema_decay) != 1:
+            raise ValueError(f"Expected a single ema_decay value, got {ema_decay}")
+        ema_decay = float(ema_decay[0])
+    else:
+        ema_decay = float(ema_decay)
+
+    if cfg_list is None:
+        cfg_list = [1.0]
+    elif isinstance(cfg_list, (list, tuple)):
+        cfg_list = [float(cfg) for cfg in cfg_list]
+    else:
+        cfg_list = [float(cfg_list)]
+
+    state = TrainState(
+        step=0,
+        model=model,
+        optimizer=optimizer,
+        ema_model=ema_model,
+        ema_decay=ema_decay,
+        device=device,
+    )
+
+    print(f"Restoring checkpoint from {workdir}")
+    state = restore_checkpoint(state=state, workdir=workdir)
+    print(f"Checkpoint restored (step={int(state.step)})")
+    if int(state.step) == 0 and init_from:
+        log_for_0("Initializing generator params from init_from=%s", init_from)
+        state = maybe_init_state_params(
+            state,
+            model_type="generator",
+            init_from=init_from,
+            hf_cache_dir=HF_ROOT,
+        )
+
+    assert feature_params is not None, "feature_params must be provided for feature extraction"
+
+    state.model = maybe_compile(state.model, compile_level)
+    state.ema_model = maybe_compile(state.ema_model, compile_level)
+
+    if _world_size() > 1:
+        print(f"Wrapping model with DDP (world_size={_world_size()})...")
+        state.model = DDP(
+            state.model,
+            device_ids=[local_rank] if device.type == "cuda" else None,
+            output_device=local_rank if device.type == "cuda" else None,
+            broadcast_buffers=False,
+        )
+        print("DDP ready.")
+
+    print("Starting training loop...")
+    step = int(state.step)
+    initial_step = step
+    pbar = tqdm(range(step, total_steps), initial=step, total=total_steps) if is_rank_zero() else range(step, total_steps)
+
+    memory_bank_positive = ArrayMemoryBank(num_classes=1000, max_size=positive_bank_size)
+    memory_bank_negative = ArrayMemoryBank(num_classes=1, max_size=negative_bank_size)
+    train_iter = infinite_sampler(train_loader, step)
+
+    for step in pbar:
+        start_time = time.time()
+        n_push = 0
+        logger.set_step(step)
+
+        goal = push_per_step
+        if initial_step > 0 and step == initial_step:
+            goal = push_at_resume * push_per_step
+            print(f"pushing at resume: {goal}")
+
+        while True:
+            batch = next(train_iter)
+            processed_batch = preprocess_fn(batch)
+            images = processed_batch["images"]
+            labels = processed_batch["labels"]
+            memory_bank_positive.add(images.detach().cpu().numpy(), labels.detach().cpu().numpy())
+            memory_bank_negative.add(images.detach().cpu().numpy(), (labels * 0).detach().cpu().numpy())
+            n_push += images.shape[0]
+            if n_push >= goal:
+                break
+
+        bsz_per_host = train_batch_size // max(1, _world_size())
+        if bsz_per_host > 0:
+            assert labels.shape[0] >= bsz_per_host, f"Labels shape {labels.shape[0]} < bsz_per_host {bsz_per_host}"
+            select_indices = torch.randperm(labels.shape[0])[:bsz_per_host]
+            labels = labels[select_indices]
+
+        positive_samples = memory_bank_positive.sample(labels.detach().cpu().numpy(), n_samples=pos_per_sample)
+        negative_samples = memory_bank_negative.sample((labels * 0).detach().cpu().numpy(), n_samples=neg_per_sample)
+
+        merged_positive, merged_negative, merged_labels = merge_data((positive_samples, negative_samples, labels))
+
+        process_time = time.time() - start_time
+
+        profile_metrics = {}
+        if profile and step == initial_step:
+            profile_metrics = profile_func(
+                lambda s, l, p, n, fp: train_step(
+                    s,
+                    l,
+                    p,
+                    n,
+                    fp,
+                    feature_apply=activation_fn,
+                    learning_rate_fn=learning_rate_fn,
+                    activation_kwargs=activation_kwargs,
+                    loss_kwargs=loss_kwargs,
+                    max_grad_norm=max_grad_norm,
+                    **forward_dict,
+                ),
+                (state, merged_labels, merged_positive, merged_negative, feature_params),
+                name="train_step",
+            )
+
+        state, metrics = train_step(
+            state,
+            merged_labels,
+            merged_positive,
+            merged_negative,
+            feature_params,
+            feature_apply=activation_fn,
+            learning_rate_fn=learning_rate_fn,
+            activation_kwargs=activation_kwargs,
+            loss_kwargs=loss_kwargs,
+            max_grad_norm=max_grad_norm,
+            objective=objective,
+            freq_weight=freq_weight,
+            freq_weight_start=freq_weight_start,
+            freq_weight_end=freq_weight_end,
+            freq_transition_frac=freq_transition_frac,
+            freq_weight_high=freq_weight_high,
+            total_steps_for_sched=total_steps,
+            rep_align_weight=rep_align_weight,
+            rep_condition=rep_condition,
+            rep_head=rep_head,
+            rep_target_fn=rep_target_fn,
+            **forward_dict,
+        )
+
+        total_time = time.time() - start_time
+        metrics["total_time"] = total_time
+        metrics["process_time"] = process_time
+        metrics["kimg"] = (step + 1) * merged_positive.shape[0] / 1000.0
+        metrics["forward_kimg"] = (step + 1) * merged_positive.shape[0] / 1000.0 * forward_dict["gen_per_label"]
+        metrics.update(profile_metrics)
+
+        logger.log_dict(metrics)
+
+        now_step = step + 1
+        do_train_sample = int(train_sample_per_step) > 0 and (
+            now_step % int(train_sample_per_step) == 0 or now_step == total_steps
+        )
+        if do_train_sample:
+            sample_cfg = cfg_list[0] if train_sample_cfg is None else float(train_sample_cfg)
+            _log_training_samples(
+                logger=logger,
+                eval_loader=eval_loader,
+                model=state.ema_model,
+                postprocess_fn=postprocess_fn,
+                cfg_scale=sample_cfg,
+                grid_size=int(train_sample_grid_size),
+                seed=int(train_sample_seed),
+            )
+            _sync_after_rank0_io(workdir, f"sample_step_{now_step:09d}")
+
+        if now_step % save_per_step == 0 or now_step == total_steps:
+            save_checkpoint(state, keep=keep_last, keep_every=keep_every, workdir=workdir)
+            save_params_ema_artifact(
+                state,
+                workdir=workdir,
+                kind="gen",
+                model_config=_generator_model_config(model),
+            )
+            _sync_after_rank0_io(workdir, f"save_step_{now_step:09d}")
+
+        do_step_one_eval = bool(eval_on_step_one) and now_step == 1
+        do_eval = bool(run_eval) and ((now_step % eval_per_step == 0) or do_step_one_eval or (now_step == total_steps))
+        if do_eval:
+            is_sanity = do_step_one_eval
+            n_samples = 500 if is_sanity else eval_samples
+            folder_prefix = "sanity" if is_sanity else "CFG"
+            round_best_fid = float("inf")
+            round_best_cfg = cfg_list[0]
+            eval_cfg_list = cfg_list if not is_sanity else [cfg_list[0]]
+
+            use_ddp_eval = _world_size() > 1
+            eval_fn = evaluate_fid_ddp if use_ddp_eval else evaluate_fid
+            for eval_cfg in eval_cfg_list:
+                result = eval_fn(
+                    dataset_name=dataset_name,
+                    gen_func=generate_step,
+                    gen_params={
+                        "params": state.ema_model,
+                        "apply_fn": lambda m, y, cfg: m(c=y, cfg_scale=cfg, train=False)["samples"],  # noqa: E731
+                        "cfg_scale": eval_cfg,
+                        "postprocess_fn": postprocess_fn,
+                    },
+                    eval_loader=eval_loader,
+                    logger=logger if _rank() == 0 else None,
+                    num_samples=n_samples,
+                    log_folder=f"{folder_prefix}{eval_cfg}",
+                    log_prefix=f"EMA_{state.ema_decay:g}",
+                )
+                if _rank() == 0:
+                    fid_val = result.get("fid", float("inf"))
+                    if fid_val < round_best_fid:
+                        round_best_fid = fid_val
+                        round_best_cfg = eval_cfg
+
+            if not is_sanity and _rank() == 0:
+                log_for_0("best_fid=%.4f best_cfg=%.1f (step=%d)", round_best_fid, round_best_cfg, now_step)
+                logger.log_dict({"best_fid": round_best_fid, "best_cfg": round_best_cfg})
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+
+    logger.finish()
+    del model, optimizer, eval_loader, train_loader, state
+    gc.collect()
+
+
+def main_gen(config, output_dir="runs", profile=False):
+    if "logging" not in config:
+        config.logging = {}
+    config.logging.name = Path(output_dir).resolve().name
+
+    from models.generator import DitGen
+
+    set_global_mesh(config.get("hsdp_dim", min(8, max(1, _world_size()))))
+
+    arch = str(config.get("model", {}).get("arch", "dit")).strip().lower()
+    if arch == "crossflow":
+        from CrossFlow import CrossFlow
+
+        model_class = CrossFlow
+    elif arch in ("dit", "lightningdit", ""):
+        model_class = DitGen
+    else:
+        raise ValueError(f"Unknown model.arch: {arch!r}")
+
+    print("Building generator model...")
+    model_dict = build_model_dict(config, model_class, workdir=output_dir)
+    print("Generator model built.")
+    use_aug = bool(config.dataset.get("use_aug", False))
+    use_latent = bool(config.dataset.get("use_latent", False))
+    use_cache = bool(config.dataset.get("use_cache", False))
+    postprocess_fn_noclip = get_postprocess_fn(
+        use_aug=use_aug,
+        use_latent=use_latent,
+        use_cache=use_cache,
+        has_clip=False,
+    )
+    feature_cfg = model_dict.feature
+    mae_path = str(feature_cfg.get("mae_path", "")).strip()
+    if not mae_path and bool(feature_cfg.get("use_mae", True)):
+        load_dict = feature_cfg.get("load_dict", {})
+        if str(load_dict.get("source", "hf")).strip().lower() == "local":
+            mae_path = str(load_dict.get("path", "")).strip()
+        else:
+            model_name = str(load_dict.get("hf_model_name", "")).strip()
+            if model_name:
+                mae_path = f"hf://{model_name}"
+    if bool(feature_cfg.get("use_mae", True)) and not mae_path:
+        raise ValueError("feature.mae_path (or feature.load_dict.hf_model_name / feature.load_dict.path) is required when use_mae=true.")
+    compile_level = int(config.get("compile", 2))
+    grounding_cfg = feature_cfg.get("grounding") or {}
+    rep_head = None
+    rep_target_fn = None
+    if grounding_cfg:
+        # Mechanism A: representation grounding — drift in a frozen encoder's
+        # feature space (SD-VAE / RAE / PAE). Decoder is never used.
+        from grounding import GroundingFeatureExtractor, build_frozen_encoder
+
+        gkind = str(grounding_cfg.get("kind", "sdvae"))
+        encoder = build_frozen_encoder(gkind, device=_device(),
+                                       **{k: v for k, v in grounding_cfg.items() if k != "kind"})
+        encoder = encoder.to(_device())
+        activation_fn = GroundingFeatureExtractor(encoder).to(_device())
+        variables = {"grounding_encoder": encoder}
+        print(f"Feature extractor: representation grounding ({gkind}).")
+
+        if bool(feature_cfg.get("use_rep_head", False)) or bool(config.train.get("rep_condition", False)):
+            # Mechanism B: predict-then-condition — a representation head maps the
+            # generator's hidden state to encoder tokens, aligned to the frozen target.
+            from grounding import RepresentationHead
+
+            hid = int(config.model.get("hidden_size", 512))
+            ntok = int(config.model.get("img_size", 64) // config.model.get("patch_size", 8)) ** 2
+            rep_head = RepresentationHead(hid, encoder.latent_dim, ntok).to(_device())
+            rep_target_fn = encoder.encode
+            variables["rep_head"] = rep_head
+            # add the representation head to the optimizer so it trains with the generator
+            model_dict.optimizer.add_param_group({"params": list(rep_head.parameters())})
+            print("Representation head: predict-then-condition enabled.")
+    else:
+        print(f"Loading feature extractor from {mae_path}...")
+        activation_fn, variables = build_activation_function(
+            mae_path=mae_path,
+            use_convnext=bool(feature_cfg.get("use_convnext", False)),
+            use_mae=bool(feature_cfg.get("use_mae", True)),
+            postprocess_fn=postprocess_fn_noclip,
+            compile_level=compile_level,
+            device=_device(),
+        )
+    print("Feature extractor loaded.")
+    train_gen(
+        model=model_dict.model,
+        optimizer=model_dict.optimizer,
+        logger=model_dict.logger,
+        eval_loader=model_dict.eval_loader,
+        train_loader=model_dict.train_loader,
+        learning_rate_fn=model_dict.learning_rate_fn,
+        preprocess_fn=model_dict.preprocess_fn,
+        postprocess_fn=model_dict.postprocess_fn,
+        dataset_name=model_dict.dataset_name,
+        activation_fn=activation_fn,
+        feature_params=variables,
+        rep_head=rep_head,
+        rep_target_fn=rep_target_fn,
+        workdir=output_dir,
+        compile_level=compile_level,
+        profile=profile,
+        **sanitize_train_config(config.train),
+    )
+
+
+def main(args):
+    run_init()
+    config = load_config(args.config)
+    main_gen(config, output_dir=args.workdir, profile=args.profile)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/gen/latent_ablation.yaml", help="Path to configuration file.")
+    parser.add_argument("--workdir", type=str, default="runs", help="Local workdir root for checkpoints/logs.")
+    parser.add_argument("--profile", action="store_true", default=False, help="Run profiling on the first training step.")
+    args = parser.parse_args()
+    args.workdir = stamp_workdir(args.workdir)
+    args.output_dir = args.workdir
+
+    main(args)

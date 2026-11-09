@@ -1,0 +1,23 @@
+
+\subsection{Implementation Details}
+
+\textbf{Computing the time derivative.} Following Improved MeanFlow~\citep{imf}, the total time derivative $\frac{\mathrm dF_{\theta}}{\mathrm dt}$ is evaluated along the latent diffusion trajectory via a Jacobian-Vector Product ($\mathrm{JVP}$):
+$\frac{\mathrm dF_{\theta}}{\mathrm dt} = \mathrm{JVP}\Big(F_\theta(z_t, t, r), , \big(v(z_t, t, z), 1, 0\big)\Big),$
+where the first tuple defines the function inputs and the second tuple represents the corresponding tangent directions. To optimize computational efficiency, we execute this step using forward-mode automatic differentiation (\texttt{torch.func.jvp}), which incurs a marginal overhead of approximately twice the runtime of a standard forward pass. Following the convention established by MeanFlow~\citep{meanflow}, the $\mathrm{JVP}$ term is detached from the computational graph during backpropagation.
+
+\textbf{Two-Stage Training Pipeline.} In addition to the generator $F_{\theta}$, our framework relies on an encoder $\mathcal{E}$ to project input images into the latent domain. Although the cross-space objective theoretically supports end-to-end joint optimization of $F_{\theta}$ and $\mathcal{E}$, simultaneous training exhibits optimization instabilities in practice. To mitigate this issue, we adopt a decoupled, two-stage training pipeline. In the first stage, the encoder $\mathcal{E}$ is trained within a standard autoencoder framework using a combination of reconstruction and adversarial objectives; the corresponding decoder is subsequently discarded. In the second stage, the weights of $\mathcal{E}$ are frozen, and the cross-space generator $F_{\theta}$ is trained from scratch. This modular formulation allows CrossFlow to seamlessly integrate high-performance, pretrained structural encoders. By default, we employ the encoder from VA-VAE~\citep{VAVAE}. We defer the development of stable single-stage joint training strategies to future work.
+% # we do use a pretrained VAE in our primary exps
+
+\textbf{Loss function.} Because the CrossFlow objective directly aligns the network outputs and their time derivatives with the pixel-space target $x_0$, the framework can natively leverage advanced structural and perceptual image metrics to guide generation. Mirroring standard practice in autoencoder training, our total optimization objective augments the pixel-wise $L1$ loss with an adversarial GAN loss and perceptual loss. Notably, incorporating the analytical weight $\frac{r}{t^2}$ into the perceptual loss induces training instability. We therefore omit this weighting factor during perceptual loss computation.
+
+%Empirically, we observe that the adversarial gradient behaves heterogeneously across the noise schedule. To maintain optimization stability and preserve global geometric coherence, we introduce a time-dependent weight scheduler $w(t)$ that monotonically downweights the adversarial loss component as $t \to 1$. An ablation study verifying the efficacy of this scheduling strategy is provided in Figure~\ref{fig:gan_weight}. 
+%Complete specifications regarding the underlying neural network architectures, hyperparameter configurations, and auxiliary loss balances are detailed in Appendix~\ref{app:implementation_details}.
+
+%Our final training objectives:
+%\begin{equation}
+%    \mathcal{L} =  \mathcal{L}_{\mathrm{CF,MSE}} + \mathcal{L}_{\mathrm{CF,Perceptual}} + \mathcal{L}_{\mathrm{adv}}
+%\end{equation}
+
+%Empirically, we observe that the adversarial gradient behaves heterogeneously across the noise schedule: it refines fine-grained, low-level textures at low noise levels (small $t$), but alters macroscopic semantic structure under high noise regimes (large $t$). To maintain optimization stability and preserve global geometric coherence, we introduce a time-dependent weight scheduler $w(t)$ that monotonically downweights the adversarial loss component as $t \to 1$. An ablation study verifying the efficacy of this scheduling strategy is provided in Figure~\ref{fig:gan_weight}. Complete specifications regarding the underlying neural network architectures, hyperparameter configurations, and auxiliary loss balances are detailed in Appendix~\ref{app:implementation_details}.
+
+%Empirically, the GAN loss behaves differently across the noise schedule: it refines low-level textures at small $t$ while affecting higher-level structure at large $t$. We find that a time-dependent weight scheduler $w(t)$, which downweights the adversarial contribution as $t$ increases, improves stability and performance. Figure~\ref{fig:gan_weight} ablates this choice. Additional details on the architecture, sampling strategy, and auxiliary loss weights are provided in Appendix~\ref{app:implementation_details}.

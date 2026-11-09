@@ -1,0 +1,92 @@
+dataset:
+  batch_size: 1024
+  eval_batch_size: 1024
+  kwargs:
+    num_workers: 8
+    pin_memory: true
+    prefetch_factor: 2
+  num_classes: 1000
+  resolution: 256
+  use_aug: true
+  use_cache: false
+  use_latent: false
+feature:
+  mae_path: hf://mae_pixel_640
+  use_convnext: true
+  use_mae: true
+hsdp_dim: 8
+logging:
+  entity: YOUR_WANDB_ENTITY
+  log_every_k: 20
+  project: YOUR_WANDB_PROJECT
+  use_wandb: false
+model:
+  arch: crossflow
+  depth: 28
+  grad_checkpoint: true
+  hidden_size: 1152
+  img_size: 256
+  latent_channels: 4
+  latent_patch_size: 2
+  latent_size: 32
+  mlp_ratio: 4.0
+  num_context_tokens: 16
+  num_heads: 18
+  output_activation: tanh
+  patch_size: 16
+  size: XL
+optimizer:
+  adam_b1: 0.9
+  adam_b2: 0.95
+  lr_schedule:
+    learning_rate: 0.0002
+    lr_schedule: const
+    total_steps: 100000
+    warmup_steps: 10000
+  weight_decay: 0.01
+train:
+  activation_kwargs:
+    every_k_block: 2
+    patch_mean_size:
+    - 2
+    - 4
+    patch_std_size:
+    - 2
+    - 4
+    use_mean: true
+    use_std: true
+  cfg_list:
+  - 1.0
+  - 1.1
+  - 1.2
+  - 1.4
+  - 1.6
+  - 1.8
+  - 2.0
+  - 2.5
+  - 3.0
+  - 3.5
+  ema_decay: 0.999
+  eval_per_step: 5000
+  eval_samples: 50000
+  forward_dict:
+    cfg_max: 4.0
+    cfg_min: 1.0
+    gen_per_label: 64
+    neg_cfg_pw: 5.0
+    no_cfg_frac: 0.0
+  keep_last: 2
+  loss_kwargs:
+    R_list:
+    - 0.2
+    - 0.05
+    - 0.02
+  neg_per_sample: 32
+  negative_bank_size: 1000
+  pos_per_sample: 128
+  positive_bank_size: 128
+  push_per_step: 128
+  save_per_step: 2000
+  seed: 42
+  total_steps: 100000
+  train_batch_size: 64

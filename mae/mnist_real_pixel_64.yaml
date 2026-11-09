@@ -1,0 +1,63 @@
+hsdp_dim: 1
+compile: 0
+
+logging:
+  use_wandb: false
+  log_every_k: 50
+
+dataset:
+  name: mnist
+  resolution: 64
+  use_aug: false
+  use_latent: false
+  use_cache: false
+  num_classes: 10
+  batch_size: 256
+  eval_batch_size: 256
+  kwargs:
+    num_workers: 4
+    pin_memory: false
+    prefetch_factor: 2
+
+model:
+  base_channels: 128
+  patch_size: 2
+  dropout_prob: 0.0
+  layers: [2, 2, 2, 2]
+  in_channels: 3
+  input_patch_size: 8
+
+optimizer:
+  lr_schedule:
+    learning_rate: 0.002
+    warmup_steps: 200
+    lr_schedule: "const"
+    total_steps: 5000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+
+train:
+  seed: 42
+  total_steps: 5000
+  save_per_step: 1000
+  eval_per_step: 500
+  eval_samples: 256
+  forward_dict:
+    mask_ratio_min: 0.5
+    mask_ratio_max: 0.5
+    lambda_cls: 0.0
+  eval_forward_dict:
+    mask_ratio_min: 0.5
+    mask_ratio_max: 0.5
+    lambda_cls: 0.0
+  ema_decay: 0.999
+  keep_last: 2
+  finetune_last_steps: 500
+  warmup_finetune: 200
+  finetune_cls: 0.5
+
+feature:
+  use_mae: false
+  use_convnext: false
+  mae_path: ""

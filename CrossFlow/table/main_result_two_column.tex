@@ -1,0 +1,31 @@
+\begin{table}[t]
+\centering
+\caption{\textbf{System-level comparison on ImageNet $256\times256$ generation.} FID is evaluated on 50,000 generated samples. $\times 2$ in NFE indicates classifier-free guidance. Methods are grouped by sampling regime and generation space; CrossFlow is a one-step latent-to-pixel generator.}
+\vspace{0.5em}
+\scriptsize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{l | cc | c | c| l | cc |c |c}
+\toprule
+\textbf{Method} & NFE & Space & Params & FID $\downarrow$ & \textbf{Method} & NFE & Space & Params & FID $\downarrow$\\
+\midrule
+\multicolumn{5}{l|}{\textit{Multi-step latent-space diffusion/flow}} & \multicolumn{5}{l}{\textit{1-NFE pixel-space GAN}}\\
+\quad DiT-XL/2~\citep{dit} & 250$\times$2 & latent & 675M & 2.27 & \quad BigGAN-deep~\citep{biggan} & 1 & pixel & 56M & 6.95\\
+\quad SiT-XL/2~\citep{sit} & 250$\times$2 & latent & 675M & 2.06 & \quad StyleGAN-XL~\citep{stylegan} & 1 & pixel & 166M & 2.30 \\
+\quad SiT-XL/2 + REPA~\citep{repa} & 250$\times$2 & latent & 675M & \textbf{1.42} & \quad GigaGAN~\citep{gigagan} & 1 & pixel & 569M & 3.45\\
+\midrule
+\multicolumn{5}{l|}{\textit{Multi-step pixel-space diffusion/flow}} & \multicolumn{5}{l}{\textit{1-NFE pixel-space diffusion/flow}}\\
+\quad ADM-G~\citep{adm} & 250$\times$2 & pixel & 554M & 4.59 & \quad EPG-L/16~\citep{epg} & 1 & pixel & 540M & 8.82 \\
+\quad SiD, UViT~\citep{sid} & 1000$\times$2 & pixel & 2.5B & 2.44 & \quad pMF-B/16~\citep{pmf} & 1 & pixel & 118M & 3.12\\
+\quad VDM++~\citep{vdmpp} & 256$\times$2 & pixel & 2.5B & 2.12 & \quad pMF-L/16~\citep{pmf} & 1 & pixel & 410M & 2.52\\
+\quad SiD2~\citep{sid2} & 512$\times$2 & pixel & -- & 1.38 & \quad pMF-H/16~\citep{pmf} & 1 & pixel & 956M & 2.22 \\
+\quad PixelDiT-XL/16~\citep{pixeldit} & 100$\times$2 & pixel & 797M & \textbf{1.61} \\
+\midrule
+\multicolumn{5}{l|}{\textit{1-NFE latent-space diffusion/flow}} & \multicolumn{5}{l}{\textbf{\textit{1-NFE latent-to-pixel (ours)}}} \\
+\quad iCT-XL/2~\citep{ICT} & 1 & latent & 675M  & 34.24 & \quad CrossFlow-B & 1 & latent$\to$pixel & 95M & 2.54 \\
+\quad Shortcut-XL/2~\citep{shortcut} & 1 & latent & 676M & 10.60 & \quad CrossFlow-L & 1 & latent$\to$pixel & 315M & 1.69 \\
+\quad MeanFlow-XL/2~\citep{meanflow} & 1 & latent & 676M & 3.43 & \quad CrossFlow-XL & 1 & latent$\to$pixel & 461M & \textbf{1.62}\\
+\quad iMF-XL/2~\citep{imf} & 1 & latent & 659M & 1.72 \\
+\bottomrule
+\end{tabular}
+\label{tab:main_results}
+\end{table}

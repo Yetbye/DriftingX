@@ -1,0 +1,82 @@
+\documentclass{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{wrapfig}
+\usepackage{caption}
+\usepackage[preprint]{neurips_2026}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+% \usepackage{hyperref}
+% \hypersetup{hidelinks}
+% \usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{xcolor}
+\setcitestyle{numbers,square}
+
+\newcommand{\roxie}[1]{{\color{blue}[roxie: {#1}]}}
+\newcommand{\xiyuanwang}[1]{{\color{red}[xiyuanwang: {#1}]}}
+% \usepackage[table]{xcolor}  % loads also »colortbl«         % colors
+\definecolor{plum}  {rgb}{.5,0,.5}
+\definecolor{forest}  {rgb}{0,.4,0} 
+\definecolor{midnight}  {rgb}{0,0,.5} 
+\definecolor{gray}  {rgb}{.8,.8,.8} 
+\definecolor{orange}{rgb}{.87,.414,.062}
+\definecolor{dkorange}{HTML}{D24E23}
+\definecolor{violet}{HTML}{674ea7}
+%\definecolor{red}{rgb}{.7,0,0}
+\definecolor{brick}{rgb}{.7,0,0}
+\definecolor{green}{HTML}{417e27}  
+\definecolor{blue}{rgb}{0,0,.7}
+\definecolor{maroon}{rgb}{0.52,0,0}
+\definecolor{royalpurple}{rgb}{0.47,0.32,0.66}
+\definecolor{tan}{rgb}{0.82,0.70,0.54}
+\usepackage[pdftex,plainpages=false,pdfpagelabels,colorlinks=true,urlcolor=midnight,linkcolor=black!80,citecolor=blue]{hyperref}
+
+\title{CrossFlow: One-Step Generation Across Latent and Pixel Spaces}
+
+\author{
+Xiyuan Wang\textsuperscript{1},
+Xiao Zhang\textsuperscript{2},
+Yang Li\textsuperscript{2},
+Ruoxi Jiang\textsuperscript{3},
+Zhao Zhong\textsuperscript{2},
+Liefeng Bo\textsuperscript{2},
+Muhan Zhang\textsuperscript{1}\thanks{Corresponding author.}
+\\
+\textsuperscript{1}Institute for Artificial Intelligence, Peking University
+\qquad
+\textsuperscript{2}Tencent
+\qquad
+\textsuperscript{3}Fudan University
+\\
+\texttt{wangxiyuan@pku.edu.cn}
+\qquad
+\texttt{muhan@pku.edu.cn}
+}
+
+\begin{document}
+\maketitle
+
+\input{chapter/abstract}
+\input{chapter/intro}
+\input{chapter/related_work}
+\input{chapter/method}
+\input{chapter/discussion}
+\input{chapter/exp}
+\input{chapter/conclusion}
+
+\newpage
+{
+    \small
+    \bibliographystyle{IEEEtran}
+    \bibliography{main}
+}
+\appendix
+
+\input{chapter/appendix}
+\end{document}

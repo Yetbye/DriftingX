@@ -1,0 +1,89 @@
+\section{Method}
+Diffusion models are typically confined to a single operating space. As a consequence, they lack native support for cross-space generation, such as directly mapping from noisy latents to pixels. This restriction is particularly pronounced in latent diffusion models (LDMs), which necessitate an auxiliary decoder to project the generated latents back into the pixel domain. We propose \textit{CrossFlow} to bridge this gap by extending flow-based supervision to cross-space configurations. By optimizing the model to map a latent prior directly to a sample in the image space, CrossFlow eliminates the need for sequential latent generation and separate decoding.
+
+\subsection{Background: Latent Diffusion Models (LDM)}
+
+Consider a data sample $x \sim p_{\text{data}}$ and Gaussian noise $\epsilon \sim \mathcal{N}(0, I)$. The LDM first maps the data into a latent representation via an encoder $z = \mathcal{E}(x)$, and subsequently constructs a noisy latent trajectory:
+\begin{equation}
+z_t = \alpha(t) z + \beta(t) \epsilon,
+\label{eq:ldm_forward}
+\end{equation}
+where $t \in [0, 1]$ parameterizes the noise schedule. The coefficient functions $\alpha(t)$ and $\beta(t)$ satisfy the boundary conditions $\alpha(0) = 1$, $\beta(0) = 0$, $\alpha(1) = 0$, and $\beta(1) = 1$. Generative modeling in an LDM proceeds by solving the probability-flow ordinary differential equation (PF-ODE):
+\begin{equation}
+z_0 = z_1 + \int_{1}^{0} v(z_\tau, \tau)\,\mathrm{d}\tau,
+\label{eq:pf_ode}
+\end{equation}
+where $v(z_{\tau}, \tau)$ denotes the marginal velocity of the latent state $z_{\tau}$. The resulting clean latent $z_0$ is subsequently mapped back to the pixel space using a decoder, yielding $x_0 = \mathcal{D}(z_0)$. To estimate the intractable marginal velocity $v(z_t, t)$, we leverage the tractable conditional velocity $v(z_t, t, z)$:
+\begin{equation}
+v(z_t, t, z) = \dot{\alpha}(t)z + \dot{\beta}(t)\epsilon = \left(\dot{\alpha}(t)-\frac{\dot{\beta}(t)}{\beta(t)}\alpha(t)\right)z + \frac{\dot{\beta}(t)}{\beta(t)}z_t,
+\label{eq:conditional_velocity}
+\end{equation}
+where dots indicate time derivatives with respect to $t$. The diffusion model $F_\theta$ is optimized via score-matching regression:
+\begin{equation}
+\mathcal{L}_{v} = \mathbb{E}_{x,\epsilon,t} \left\| F_\theta(z_t, t) - v(z_t, t, z) \right\|_2^2.
+\end{equation}
+At convergence, $F_{\theta}(z_t,t)$ recovers the marginal velocity $v(z_t,t)$ via the conditional expectation:
+\begin{equation}
+v(z_t, t) = \mathbb{E}_{z\sim p(\cdot|z_t)}\left[v(z_t, t, z)\right].
+\label{eq:marginal_velocity}
+\end{equation}
+
+During inference, Eq.~\eqref{eq:pf_ode} is integrated numerically to transport $z_t$ toward the clean latent $z_0$. This formulation strictly mandates that the model output $F_\theta(z_t, t)$ resides in the same mathematical space as $z_t$, fundamentally preventing standard LDMs from executing end-to-end latent-to-pixel generation.
+
+One-step generative models relax the integration overhead by learning a direct mapping from the latent prior $z_1$ to the clean target $z_0$ within a single evaluation. However, because their underlying derivations remain tied to intra-space velocity fields, they cannot be readily extended to cross-space generation. To overcome this limitation, we introduce a unified framework for cross-space flow supervision.
+
+\subsection{A Unified Framework for Cross-Space Flow Supervision}
+
+In principle, one-step models map between arbitrary points along a probability path without explicit numerical integration. To analyze these methodologies systematically, we first introduce a unified formulation that encompasses a broad family of single-step generative paradigms. For $0 \le r \le t \le 1$ and arbitrary coefficient functions $\lambda(t, r)$ and $\gamma(t, r)$, we define the target function:
+\begin{equation}
+\mathcal{Z}(z_t, t, r; \lambda, \gamma) = \lambda(t, r) z_t + \frac{1}{\gamma(t, r)} \int_{t}^{r} v(z_\tau, \tau)\,\mathrm{d}\tau.
+\label{eq:general_z}
+\end{equation}
+This formulation highlights how varying the parameterization of the ODE flow recovers different architectures. In the first regime, where $\lambda(t, r)=\gamma(t, r)=1$, $\mathcal{Z}$ corresponds to the exact solution of the PF-ODE. Setting $r=0$ recovers consistency models~\citep{CM,ICT}, whereas specifying a flexible destination $r \in [0, 1]$ yields consistency trajectory models~\citep{CTM}. This ODE-based parameterization is also closely linked to shortcut models~\citep{shortcut}. In a second regime, where $\lambda=0$, $\mathcal{Z}$ simplifies to a time-averaged velocity integral. Specifically, choosing $\gamma(t, r)=r-t$, $\alpha(t)=1-t$, and $\beta(t)=t$ instantiates MeanFlow~\citep{meanflow} and Improved MeanFlow~\citep{imf}.
+
+Despite its generality, this unified representation reveals why existing methods are incompatible with cross-space generation: their training objectives depend inherently on the latent-space velocity field. For instance, few-step models like Improved MeanFlow~\citep{imf} supervise the network by matching a linear combination of the model output and its time derivative to a local latent-velocity target. Such formulations rely entirely on the structural homogeneity between the input and output spaces. To lift this constraint, we introduce two design criteria.
+
+\paragraph{Criterion 1: Eliminating Latent-Velocity Dependencies.}
+To enable cross-space supervision, the objective function must be structurally decoupled from latent-space velocities. Direct supervision via velocity terms prevents parameterizing a generator that maps latents to pixels. 
+
+Following standard conventions~\citep{meanflow}, we differentiate Eq.~\eqref{eq:general_z} with respect to $t$. Simplifying the expression via Eq.~\eqref{eq:conditional_velocity} and Eq.~\eqref{eq:marginal_velocity} yields:
+\begin{equation}
+\begin{aligned}
+\partial_t\gamma(t,r)\mathcal{Z}(z_t, t, r; \lambda, \gamma) + \gamma(t,r)\frac{\mathrm{d}\mathcal{Z}}{\mathrm{d}t} 
+&= \partial_t (\gamma(t, r) \lambda(t, r))\left(\alpha(t)-\dot{\alpha}(t)\frac{\beta(t)}{\dot{\beta}(t)}\right)\mathbb{E}_{z_0\sim p(\cdot | z_t)}[z_0] \\
+&+\left(\partial_t (\gamma(t, r) \lambda(t, r))\frac{\beta(t)}{\dot{\beta}(t)}+\gamma(t, r) \lambda(t, r)-1\right)v(z_t,t).
+\end{aligned}
+\label{eq:z_derivative}
+\end{equation}
+To cancel the problematic marginal velocity term $v(z_t, t)$ on the right-hand side, we enforce the following structural constraint:
+\begin{equation}
+\partial_t(\gamma(t, r) \lambda(t, r))\frac{\beta(t)}{\dot{\beta}(t)}+\gamma(t, r) \lambda(t, r)-1 = 0 \implies \gamma(t,r)\lambda(t, r)=1-\frac{\phi(r)}{\beta(t)},
+\label{eq:cancel_v}
+\end{equation}
+where $\phi(r)$ is a function dependent solely on the destination timestep $r$. This provides our first necessary condition for cross-space supervision.
+
+\paragraph{Criterion 2: Endpoint Boundary Conditions at $r=0$.}
+We additionally require the framework to yield a valid image at the destination boundary $r = 0$, which mirrors the endpoint of the underlying PF-ODE:
+\begin{equation}
+\mathcal{Z}(z_t, t, 0; \lambda, \gamma) = z_t + \int_{t}^{0} v(z_\tau, \tau)\,\mathrm{d}\tau.
+\label{eq:sample_target}
+\end{equation}
+Aligning Eq.~\eqref{eq:sample_target} with the general formulation in Eq.~\eqref{eq:general_z} mandates the boundary conditions $\lambda(t, 0)=1$ and $\gamma(t, 0)=1$.
+
+\paragraph{Training Objective.}
+Synthesizing the generalized trajectory target in Eq.~\eqref{eq:z_derivative} with our design criteria yields a flexible family of cross-space optimization objectives. We replace the latent-space representation $\mathcal{Z}$ in Eq.~\eqref{eq:z_derivative} with a pixel-space neural network $F_\theta(z_t,t,r)$ and optimize it to reconstruct the paired pixel-space target $x_0$. This yields the general cross-space loss function:
+\begin{equation}
+\small
+\mathcal{L}_{\text{General}} = \mathbb{E}_{x_0,\epsilon,t,r} \left\| \partial_t \gamma(t,r)\, F_\theta(z_t,t,r) + \gamma(t,r)\frac{\mathrm{d} F_\theta(z_t,t,r)}{\mathrm{d}t} - \frac{\phi(r)\dot{\beta}(t)}{\beta(t)^2} \left( \alpha(t)-\dot{\alpha}(t)\frac{\beta(t)}{\dot{\beta}(t)} \right)x_0 \right\|_2^2,
+\label{eq:crossflow_loss_family}
+\end{equation}
+where $\frac{\mathrm{d} F_\theta}{\mathrm{d}t}$ denotes the total derivative evaluated along the latent diffusion trajectory. This objective is governed by four schedule functions. The pair $\alpha(t)$ and $\beta(t)$ determines the latent diffusion path, while $\gamma(t,r)$ and $\phi(r)$ isolate the specific cross-space statistics learned by the network. To satisfy Criterion 2, we enforce $\gamma(t,0)=1$ and $\phi(0)=0$. Together, these boundary conditions guarantee that evaluating $F_\theta(\epsilon, 1, 0)$ with a standard normal prior $\epsilon \sim \mathcal{N}(0, I)$ maps directly to a valid pixel-space sample.
+
+For our primary empirical evaluations, we adopt a simple and intuitive default instantiation: a linear noise schedule given by $\alpha(t)=1-t$ and $\beta(t)=t$, alongside $\phi(r)=r$ (satisfying $\phi(0)=0$) and $\lambda(t,r)=1$. Substituting these choices into Eq.~\eqref{eq:cancel_v} uniquely determines $\gamma(t,r)=1-\frac{r}{t}$. Plugging these schedules into Eq.~\eqref{eq:crossflow_loss_family} yields the concrete CrossFlow objective utilized in our experiments:
+
+\begin{equation}
+\mathcal{L}_{\mathrm{CF}} = \mathbb{E}_{x_0,\epsilon,t,r} \left\| \frac{r}{t^2} \cdot \left( F_\theta(z_t,t,r) + \frac{t(t-r)}{r} \frac{\mathrm{d} F_\theta(z_t,t,r)}{\mathrm{d}t} \, - \, x_0 \right) \right\|_2^2.
+\label{eq:crossflow_loss}
+\end{equation}
+
+Crucially, $F_\theta$ is never optimized to predict a latent-space displacement vector. Instead, it natively outputs a clean image while its trajectory dynamics along the latent space are structurally bound by the cross-space flow loss. We explore alternative valid configurations of $\alpha, \beta, \gamma,$ and $\phi$ across synthetic toy domains in Appendix~\ref{app:crossflow_design_space}.

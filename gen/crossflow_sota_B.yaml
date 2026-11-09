@@ -1,0 +1,84 @@
+hsdp_dim: 8
+logging:
+  project: "YOUR_WANDB_PROJECT"
+  entity: "YOUR_WANDB_ENTITY"
+  use_wandb: false
+  log_every_k: 20
+
+dataset:
+  resolution: 256
+  use_aug: true
+  use_latent: false
+  use_cache: false
+  num_classes: 1000
+  batch_size: 2048
+  eval_batch_size: 4096
+  kwargs:
+    num_workers: 8
+    pin_memory: true
+    prefetch_factor: 2
+
+# CrossFlow-B: 12 layers, hidden 768 (paper Table "hyper_parameter")
+# latent 噪声 -> 直接输出 256x256 像素；噪声来自 VAE latent 先验。
+# 约束: (latent_size/latent_patch_size) == (img_size/patch_size) == 16 -> 256 token 两侧一致
+model:
+  arch: crossflow
+  size: B
+  img_size: 256
+  patch_size: 16
+  latent_channels: 4        # SD-VAE (f8) 通道；论文用 VA-VAE 32ch 时改为 32
+  latent_size: 32           # 256/8 = 32
+  latent_patch_size: 2
+  hidden_size: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4.0
+  num_context_tokens: 16
+  output_activation: tanh
+  grad_checkpoint: false
+
+optimizer:
+  lr_schedule:
+    learning_rate: 0.0002
+    warmup_steps: 10000
+    lr_schedule: "const"
+    total_steps: 100000
+  weight_decay: 0.01
+  adam_b1: 0.9
+  adam_b2: 0.95
+
+train:
+  train_batch_size: 128
+  seed: 42
+  total_steps: 100000
+  save_per_step: 2000
+  eval_per_step: 5000
+  eval_samples: 50000
+  pos_per_sample: 128
+  neg_per_sample: 32
+  positive_bank_size: 128
+  negative_bank_size: 1000
+  push_per_step: 128
+  forward_dict:
+    gen_per_label: 64
+    cfg_min: 1.0
+    cfg_max: 4.0
+    neg_cfg_pw: 5.0
+    no_cfg_frac: 0.0
+  activation_kwargs:
+    patch_mean_size: [2, 4]
+    patch_std_size: [2, 4]
+    use_std: true
+    use_mean: true
+    every_k_block: 2
+  loss_kwargs:
+    R_list: [0.2, 0.05, 0.02]
+  cfg_list: [1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.5, 3.0, 3.5]
+  ema_decay: 0.999
+  keep_last: 2
+
+# CrossFlow 输出像素 -> 复用像素空间特征提取器
+feature:
+  mae_path: "hf://mae_pixel_640"
+  use_convnext: true
+  use_mae: true

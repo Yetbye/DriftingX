@@ -1,0 +1,32 @@
+\begin{table}[!ht]
+\centering
+\caption{\textbf{Ablation studies.} Unless otherwise specified, all models use CrossFlow-B, the VA-VAE encoder, the full loss configuration, the Muon optimizer, $r$-only time conditioning, no class-label dropout, and 160 training epochs.}
+\vspace{0.5em}
+\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{l c l c}
+\toprule
+\textbf{Ablation} & \textbf{FID $\downarrow$} & \textbf{Ablation} & \textbf{FID $\downarrow$}\\
+\midrule
+\multicolumn{2}{l}{\textit{Reference setting}} \\
+Full CrossFlow-B & \textbf{2.54} \\
+\midrule
+\multicolumn{2}{l}{\textit{Encoder choice}} \\
+Encoder: SD-VAE~\citep{ldm}, 16 latent channels & 4.08 &
+Encoder: FLUX.2~\citep{flux2}, 128 latent channels & 3.81 \\
+\midrule
+\multicolumn{2}{l}{\textit{Auxiliary losses and objective variants}} \\
+Loss: $\phi(r) = 0$ & 8.70 &
+Loss: JVP with estimated marginal velocity & 7.06\\
+Loss: without GAN loss & 8.86 &
+Loss: without perceptual loss & 30.21 \\
+Loss: without both perceptual and GAN losses & 50.65 \\
+\midrule
+\multicolumn{2}{l}{\textit{Training and conditioning choices}} \\
+Optimizer: Muon $\rightarrow$ AdamW & 2.80 &
+Time conditioning: $r\rightarrow(r,t)$ & 2.73 \\
+Class conditioning: drop class labels by 10\% & 2.76 \\
+\bottomrule
+\end{tabular}
+\label{tab:ablation}
+\end{table}
